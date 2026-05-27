@@ -1,0 +1,9 @@
+# Google OAuth credentials — never commit these
+credentials.json
+token.json
+
+# Logs
+*.log
+__pycache__/
+*.pyc
+.DS_Store
