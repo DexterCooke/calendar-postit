@@ -191,6 +191,105 @@ def fetch_upcoming_events(service, alert_minutes: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Search helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calendar_ids(service) -> list[str]:
+    """Return IDs of all selected, accessible calendars."""
+    result = service.calendarList().list().execute()
+    return [
+        c["id"] for c in result.get("items", [])
+        if c.get("selected", True)
+        and c.get("accessRole") in ("owner", "writer", "reader")
+    ]
+
+
+def fetch_events_in_range(service, start: datetime, end: datetime) -> list:
+    """Return timed events between start and end, sorted by start time."""
+    ids      = _calendar_ids(service)
+    events   = []
+    seen_ids = set()
+    for cal_id in ids:
+        try:
+            result = service.events().list(
+                calendarId=cal_id,
+                timeMin=start.isoformat(),
+                timeMax=end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            ).execute()
+            for ev in result.get("items", []):
+                if ev["id"] not in seen_ids and "dateTime" in ev.get("start", {}):
+                    events.append(ev)
+                    seen_ids.add(ev["id"])
+        except Exception as exc:
+            log.warning(f"Search: could not fetch {cal_id!r}: {exc}")
+    events.sort(key=lambda e: e["start"]["dateTime"])
+    return events
+
+
+def parse_query(text: str) -> str:
+    """Map a natural-language query to one of: next | today | tomorrow | week."""
+    t = text.lower()
+    if "tomorrow" in t:
+        return "tomorrow"
+    if any(w in t for w in ("this week", "week", "7 day", "seven day")):
+        return "week"
+    if any(w in t for w in ("today", "rest of day", "this afternoon",
+                             "this morning", "this evening")):
+        return "today"
+    # Default covers "next meeting", "upcoming", bare Enter, etc.
+    return "next"
+
+
+def run_search(service, query_text: str) -> tuple[str, list]:
+    """
+    Execute a calendar search.
+    Returns (label, events) where label is a human-readable heading.
+    """
+    now        = datetime.now(timezone.utc)
+    local_now  = now.astimezone()
+    q          = parse_query(query_text)
+
+    if q == "tomorrow":
+        day_start = (local_now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        day_end   = day_start + timedelta(days=1)
+        events    = fetch_events_in_range(service, day_start, day_end)
+        return "Tomorrow", events
+
+    if q == "week":
+        events = fetch_events_in_range(service, now, now + timedelta(days=7))
+        return "Next 7 Days", events
+
+    if q == "today":
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end   = day_start + timedelta(days=1)
+        events    = fetch_events_in_range(service, day_start, day_end)
+        return "Today", events
+
+    # "next" — single next upcoming event in the next 7 days
+    events = fetch_events_in_range(service, now, now + timedelta(days=7))
+    return "Next Meeting", events[:1]
+
+
+def format_event_date(event: dict) -> str:
+    """Return a human-friendly date+time string, e.g. 'Today at 2:30 PM'."""
+    raw        = event["start"]["dateTime"]
+    start      = datetime.fromisoformat(raw).astimezone()
+    local_now  = datetime.now().astimezone()
+    today      = local_now.date()
+    tomorrow   = today + timedelta(days=1)
+
+    time_str = start.strftime("%-I:%M %p")
+    if start.date() == today:
+        return f"Today at {time_str}"
+    if start.date() == tomorrow:
+        return f"Tomorrow at {time_str}"
+    return start.strftime(f"%A, %b %-d at {time_str}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Toggle switch widget
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -434,6 +533,262 @@ class SettingsWindow(QWidget):
         self.settings.second_reminder_enabled = checked
         self.second_widget.setVisible(checked)
         self.adjustSize()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Search window
+# ══════════════════════════════════════════════════════════════════════════════
+
+from PyQt6.QtWidgets import QLineEdit, QScrollArea
+
+class MeetingResultCard(QFrame):
+    """Compact post-it style card for a single search result."""
+
+    def __init__(self, event: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("resultCard")
+        self.setStyleSheet(f"""
+            QFrame#resultCard {{
+                background-color: {YELLOW_BG};
+                border-radius: 4px;
+                border-left: 4px solid {YELLOW_STRIPE};
+            }}
+        """)
+
+        cl = QVBoxLayout(self)
+        cl.setContentsMargins(12, 8, 12, 10)
+        cl.setSpacing(3)
+
+        # Title
+        title = QLabel(event.get("summary", "Untitled Meeting"))
+        title.setFont(QFont("Helvetica Neue", 12, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {TEXT_DARK};")
+        title.setWordWrap(True)
+        cl.addWidget(title)
+
+        # Date + time
+        dt_lbl = QLabel(f"🕐  {format_event_date(event)}")
+        dt_lbl.setFont(QFont("Helvetica Neue", 10))
+        dt_lbl.setStyleSheet(f"color: {TEXT_MED};")
+        cl.addWidget(dt_lbl)
+
+        # Location
+        location = event.get("location", "").strip()
+        if location:
+            loc = QLabel(f"📍  {location}")
+            loc.setFont(QFont("Helvetica Neue", 10))
+            loc.setStyleSheet(f"color: {TEXT_MED};")
+            loc.setWordWrap(True)
+            cl.addWidget(loc)
+
+        # Video link
+        for ep in event.get("conferenceData", {}).get("entryPoints", []):
+            if ep.get("entryPointType") == "video":
+                uri = ep.get("uri", "")
+                vid = QLabel(f'🎥  <a href="{uri}" style="color:{TEXT_MED};">Join video call</a>')
+                vid.setFont(QFont("Helvetica Neue", 10))
+                vid.setOpenExternalLinks(True)
+                cl.addWidget(vid)
+                break
+
+
+class SearchWindow(QWidget):
+    """Spotlight-style floating search window for natural-language calendar queries."""
+
+    def __init__(self, get_service_fn):
+        super().__init__()
+        self._get_service = get_service_fn
+
+        self.setWindowTitle("Calendar Post-It — Search")
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setFixedWidth(380)
+        self.setStyleSheet(f"background-color: {YELLOW_BG};")
+        self._build_ui()
+        self.adjustSize()
+        self._center()
+
+    def _center(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move(
+            screen.center().x() - self.width() // 2,
+            screen.center().y() // 2,
+        )
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 10, 10)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet(f"""
+            QFrame#card {{
+                background-color: {YELLOW_BG};
+                border-radius: 4px;
+                border-top: 5px solid {YELLOW_STRIPE};
+            }}
+        """)
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 100))
+        shadow.setOffset(3, 5)
+        card.setGraphicsEffect(shadow)
+
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 16)
+        cl.setSpacing(10)
+
+        # Header
+        hrow = QHBoxLayout()
+        pin  = QLabel("🔍")
+        pin.setFont(QFont("Apple Color Emoji", 13))
+        hdr  = QLabel("Ask your calendar")
+        hdr.setFont(QFont("Helvetica Neue", 14, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {TEXT_DARK};")
+        hrow.addWidget(pin)
+        hrow.addWidget(hdr)
+        hrow.addStretch()
+        cl.addLayout(hrow)
+
+        # Hairline
+        hl = QFrame()
+        hl.setFrameShape(QFrame.Shape.HLine)
+        hl.setStyleSheet(f"background-color: {YELLOW_STRIPE};")
+        hl.setFixedHeight(1)
+        cl.addWidget(hl)
+
+        # Query hint
+        hint = QLabel(
+            'Try: "next meeting"  ·  "meetings today"  ·  "tomorrow"  ·  "this week"'
+        )
+        hint.setFont(QFont("Helvetica Neue", 9))
+        hint.setStyleSheet(f"color: {TEXT_MED};")
+        hint.setWordWrap(True)
+        cl.addWidget(hint)
+
+        # Text input
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Ask anything about your calendar…")
+        self.input.setFont(QFont("Helvetica Neue", 12))
+        self.input.setFixedHeight(38)
+        self.input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: white;
+                border: 2px solid {YELLOW_STRIPE};
+                border-radius: 6px;
+                padding: 0 10px;
+                color: {TEXT_DARK};
+            }}
+            QLineEdit:focus {{
+                border: 2px solid {TEXT_DARK};
+            }}
+        """)
+        self.input.returnPressed.connect(self._run_search)
+        cl.addWidget(self.input)
+
+        # Search button
+        btn = QPushButton("Search  🔍")
+        btn.setFont(QFont("Helvetica Neue", 11, QFont.Weight.Medium))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedHeight(38)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {YELLOW_BTN};
+                color: {TEXT_DARK};
+                border: none;
+                border-radius: 6px;
+            }}
+            QPushButton:hover   {{ background-color: {YELLOW_BTN_HOVER}; }}
+            QPushButton:pressed {{ background-color: {YELLOW_BTN_DOWN};  }}
+        """)
+        btn.clicked.connect(self._run_search)
+        cl.addWidget(btn)
+
+        # Results area (scrollable)
+        self._results_hl = QFrame()
+        self._results_hl.setFrameShape(QFrame.Shape.HLine)
+        self._results_hl.setStyleSheet(f"background-color: {YELLOW_STRIPE};")
+        self._results_hl.setFixedHeight(1)
+        self._results_hl.setVisible(False)
+        cl.addWidget(self._results_hl)
+
+        self._result_label = QLabel("")
+        self._result_label.setFont(QFont("Helvetica Neue", 10, QFont.Weight.Bold))
+        self._result_label.setStyleSheet(f"color: {TEXT_MED};")
+        self._result_label.setVisible(False)
+        cl.addWidget(self._result_label)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet(f"background: transparent;")
+        self._scroll.setVisible(False)
+        self._scroll.setMaximumHeight(340)
+        cl.addWidget(self._scroll)
+
+        self._results_container = QWidget()
+        self._results_container.setStyleSheet("background: transparent;")
+        self._results_layout = QVBoxLayout(self._results_container)
+        self._results_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_layout.setSpacing(8)
+        self._results_layout.addStretch()
+        self._scroll.setWidget(self._results_container)
+
+        root.addWidget(card)
+
+    # ── Search logic ──────────────────────────────────────────────────────────
+
+    def _run_search(self):
+        query = self.input.text().strip()
+        if not query:
+            query = "next meeting"
+
+        self._set_results([], "Searching…")
+
+        try:
+            service = self._get_service()
+            label, events = run_search(service, query)
+        except Exception as exc:
+            self._set_results([], f"Error: {exc}")
+            return
+
+        self._set_results(events, label)
+
+    def _set_results(self, events: list, label: str):
+        # Clear old result cards
+        while self._results_layout.count() > 1:   # keep the trailing stretch
+            item = self._results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._results_hl.setVisible(True)
+        self._result_label.setVisible(True)
+        self._scroll.setVisible(True)
+
+        if not events:
+            self._result_label.setText(
+                label if label == "Searching…" else f"{label} — no meetings found"
+            )
+            self.adjustSize()
+            return
+
+        count_str = f"{len(events)} meeting{'s' if len(events) != 1 else ''}"
+        self._result_label.setText(f"{label}  ·  {count_str}")
+
+        for ev in events[:10]:   # cap at 10 cards
+            card = MeetingResultCard(ev)
+            self._results_layout.insertWidget(
+                self._results_layout.count() - 1, card   # insert before stretch
+            )
+
+        self.adjustSize()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.input.setFocus()
+        self.input.selectAll()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -858,8 +1213,9 @@ def make_tray(app: QApplication, monitor: CalendarMonitor, settings: Settings) -
     tray = QSystemTrayIcon(_make_icon(), app)
     tray.setToolTip("Calendar Post-It — running")
 
-    # Keep settings window as singleton
+    # Singleton windows
     _settings_win: list[SettingsWindow | None] = [None]
+    _search_win:   list[SearchWindow   | None] = [None]
 
     def open_settings():
         if _settings_win[0] is None or not _settings_win[0].isVisible():
@@ -868,7 +1224,16 @@ def make_tray(app: QApplication, monitor: CalendarMonitor, settings: Settings) -
         _settings_win[0].raise_()
         _settings_win[0].activateWindow()
 
+    def open_search():
+        if _search_win[0] is None or not _search_win[0].isVisible():
+            _search_win[0] = SearchWindow(get_calendar_service)
+        _search_win[0].show()
+        _search_win[0].raise_()
+        _search_win[0].activateWindow()
+
     menu = QMenu()
+    menu.addAction("🔍  Search calendar").triggered.connect(open_search)
+    menu.addSeparator()
     menu.addAction("⚙️  Settings").triggered.connect(open_settings)
     menu.addAction("🧪  Test notification").triggered.connect(monitor.show_test)
     menu.addSeparator()
