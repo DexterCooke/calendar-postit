@@ -541,15 +541,18 @@ class SettingsWindow(QWidget):
 
 from PyQt6.QtWidgets import QLineEdit, QScrollArea
 
+RESULT_COLORS = ["#ffebb0", "#f7d56c"]
+
 class MeetingResultCard(QFrame):
     """Compact post-it style card for a single search result."""
 
-    def __init__(self, event: dict, parent=None):
+    def __init__(self, event: dict, index: int = 0, parent=None):
         super().__init__(parent)
         self.setObjectName("resultCard")
+        bg = RESULT_COLORS[index % len(RESULT_COLORS)]
         self.setStyleSheet(f"""
             QFrame#resultCard {{
-                background-color: {YELLOW_BG};
+                background-color: {bg};
                 border-radius: 4px;
                 border-left: 4px solid {YELLOW_STRIPE};
             }}
@@ -605,7 +608,7 @@ class SearchWindow(QWidget):
             Qt.WindowType.WindowStaysOnTopHint
         )
         self.setFixedWidth(380)
-        self.setStyleSheet(f"background-color: {YELLOW_BG};")
+        self.setStyleSheet(f"background-color: #fff5d7;")
         self._build_ui()
         self.adjustSize()
         self._center()
@@ -625,7 +628,7 @@ class SearchWindow(QWidget):
         card.setObjectName("card")
         card.setStyleSheet(f"""
             QFrame#card {{
-                background-color: {YELLOW_BG};
+                background-color: #fff5d7;
                 border-radius: 4px;
                 border-top: 5px solid {YELLOW_STRIPE};
             }}
@@ -757,11 +760,12 @@ class SearchWindow(QWidget):
         self._set_results(events, label)
 
     def _set_results(self, events: list, label: str):
-        # Clear old result cards
+        # Remove old cards immediately (setParent(None) hides at once;
+        # deleteLater is async and leaves stale widgets visible)
         while self._results_layout.count() > 1:   # keep the trailing stretch
             item = self._results_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                item.widget().setParent(None)
 
         self._results_hl.setVisible(True)
         self._result_label.setVisible(True)
@@ -777,8 +781,8 @@ class SearchWindow(QWidget):
         count_str = f"{len(events)} meeting{'s' if len(events) != 1 else ''}"
         self._result_label.setText(f"{label}  ·  {count_str}")
 
-        for ev in events[:10]:   # cap at 10 cards
-            card = MeetingResultCard(ev)
+        for i, ev in enumerate(events[:10]):   # cap at 10 cards
+            card = MeetingResultCard(ev, index=i)
             self._results_layout.insertWidget(
                 self._results_layout.count() - 1, card   # insert before stretch
             )
