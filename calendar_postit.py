@@ -662,14 +662,29 @@ class SearchWindow(QWidget):
         hl.setFixedHeight(1)
         cl.addWidget(hl)
 
-        # Query hint
-        hint = QLabel(
-            'Try: "next meeting"  ·  "meetings today"  ·  "tomorrow"  ·  "this week"'
-        )
-        hint.setFont(QFont("Helvetica Neue", 9))
-        hint.setStyleSheet(f"color: {TEXT_MED};")
-        hint.setWordWrap(True)
-        cl.addWidget(hint)
+        # Preset pill buttons
+        presets_row = QHBoxLayout()
+        presets_row.setSpacing(6)
+        presets_row.setContentsMargins(0, 0, 0, 0)
+        for label in ("next meeting", "meetings today", "tomorrow", "this week"):
+            chip = QPushButton(label)
+            chip.setFont(QFont("Helvetica Neue", 10))
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {YELLOW_BTN};
+                    color: {TEXT_DARK};
+                    border: none;
+                    border-radius: 12px;
+                    padding: 4px 10px;
+                }}
+                QPushButton:hover   {{ background-color: {YELLOW_BTN_HOVER}; }}
+                QPushButton:pressed {{ background-color: {YELLOW_BTN_DOWN};  }}
+            """)
+            chip.clicked.connect(lambda _, q=label: self._preset_search(q))
+            presets_row.addWidget(chip)
+        presets_row.addStretch()
+        cl.addLayout(presets_row)
 
         # Text input
         self.input = QLineEdit()
@@ -742,6 +757,10 @@ class SearchWindow(QWidget):
         root.addWidget(card)
 
     # ── Search logic ──────────────────────────────────────────────────────────
+
+    def _preset_search(self, query: str):
+        self.input.setText(query)
+        self._run_search()
 
     def _run_search(self):
         query = self.input.text().strip()
