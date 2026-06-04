@@ -22,6 +22,8 @@ import ctypes
 import ctypes.util
 import json
 import logging
+import base64
+import email.mime.text
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -46,7 +48,13 @@ SCRIPT_DIR       = Path(__file__).parent.resolve()
 CREDENTIALS_FILE = SCRIPT_DIR / "credentials.json"
 TOKEN_FILE       = SCRIPT_DIR / "token.json"
 SETTINGS_FILE    = SCRIPT_DIR / "settings.json"
-SCOPES           = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES           = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+
+EMAIL_ADDRESS    = "dexter.c.cooke@gmail.com"
+EMAIL_LEAD_MINS  = 15   # send email this many minutes before meeting
 
 POLL_INTERVAL_MS = 60_000
 
@@ -151,6 +159,56 @@ def get_calendar_service():
             creds = flow.run_local_server(port=0)
         TOKEN_FILE.write_text(creds.to_json())
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+
+def get_gmail_service():
+    """Return an authorised Gmail API service (reuses same token/creds)."""
+    creds = None
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
+            creds = flow.run_local_server(port=0)
+        TOKEN_FILE.write_text(creds.to_json())
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def send_meeting_email(event: dict):
+    """Send a reminder email for the given calendar event."""
+    title      = event.get("summary", "Untitled Meeting")
+    start_raw  = event["start"]["dateTime"]
+    start_time = datetime.fromisoformat(start_raw).astimezone()
+    time_str   = start_time.strftime("%A, %B %-d at %-I:%M %p")
+
+    subject = title.upper()
+    body_parts = [title.upper(), "", f"Starting at: {time_str}"]
+
+    location = event.get("location", "").strip()
+    if location:
+        body_parts.append(f"Location: {location}")
+
+    for ep in event.get("conferenceData", {}).get("entryPoints", []):
+        if ep.get("entryPointType") == "video":
+            body_parts.append(f"Video call: {ep.get('uri', '')}")
+            break
+
+    body = "\n".join(body_parts)
+
+    msg = email.mime.text.MIMEText(body)
+    msg["to"]      = EMAIL_ADDRESS
+    msg["from"]    = EMAIL_ADDRESS
+    msg["subject"] = subject
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        gmail = get_gmail_service()
+        gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+        log.info(f"  ✉ Email sent for {event.get('summary','?')!r}")
+    except Exception as exc:
+        log.error(f"  Failed to send email for {event.get('summary','?')!r}: {exc}")
 
 
 def fetch_upcoming_events(service, alert_minutes: int):
@@ -1067,6 +1125,7 @@ class CalendarMonitor:
         self._fully_dismissed: set[str]             = set()   # no more popups ever
         self._active:          dict[str, PostItNote] = {}
         self._reminder_timers: dict[str, QTimer]    = {}
+        self._emailed:         set[str]             = set()   # email sent
 
         try:
             get_calendar_service()
@@ -1111,8 +1170,20 @@ class CalendarMonitor:
             ) if events else "")
         )
 
+        now = datetime.now(timezone.utc)
         for ev in events:
             eid = ev["id"]
+
+            # Send email reminder 15 minutes before (once per event)
+            if eid not in self._emailed:
+                start = datetime.fromisoformat(ev["start"]["dateTime"])
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                mins_until = (start - now).total_seconds() / 60
+                if 0 <= mins_until <= EMAIL_LEAD_MINS:
+                    self._emailed.add(eid)
+                    send_meeting_email(ev)
+
             if eid in self._fully_dismissed:
                 pass
             elif eid in self._notified:
