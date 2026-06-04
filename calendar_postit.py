@@ -24,6 +24,7 @@ import json
 import logging
 import base64
 import email.mime.text
+import email.utils
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -50,7 +51,7 @@ TOKEN_FILE       = SCRIPT_DIR / "token.json"
 SETTINGS_FILE    = SCRIPT_DIR / "settings.json"
 SCOPES           = [
     "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 EMAIL_ADDRESS    = "dexter.c.cooke@gmail.com"
@@ -198,14 +199,22 @@ def send_meeting_email(event: dict):
     body = "\n".join(body_parts)
 
     msg = email.mime.text.MIMEText(body)
-    msg["to"]      = EMAIL_ADDRESS
-    msg["from"]    = EMAIL_ADDRESS
-    msg["subject"] = subject
+    msg["to"]         = EMAIL_ADDRESS
+    msg["from"]       = EMAIL_ADDRESS
+    msg["subject"]    = subject
+    msg["Date"]       = email.utils.formatdate(localtime=True)
+    msg["Message-ID"] = email.utils.make_msgid()
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     try:
         gmail = get_gmail_service()
-        gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+        # Use import (not send) so the message lands directly in the inbox
+        # without triggering Gmail's spam/phishing scanner
+        gmail.users().messages().import_(
+            userId="me",
+            neverMarkSpam=True,
+            body={"raw": raw, "labelIds": ["INBOX"]},
+        ).execute()
         log.info(f"  ✉ Email sent for {event.get('summary','?')!r}")
     except Exception as exc:
         log.error(f"  Failed to send email for {event.get('summary','?')!r}: {exc}")
