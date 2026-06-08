@@ -183,9 +183,11 @@ def send_ntfy(event: dict):
 
 def fetch_upcoming_events(service, alert_minutes: int):
     """Return timed events starting within the alert window across all calendars."""
-    now      = datetime.now(timezone.utc)
-    time_min = now - timedelta(minutes=alert_minutes)
-    time_max = now + timedelta(minutes=alert_minutes + 2)
+    now        = datetime.now(timezone.utc)
+    time_min   = now - timedelta(minutes=alert_minutes)
+    # Look ahead far enough to catch push notifications (15 min) plus a buffer
+    lookahead  = max(alert_minutes, NOTIFY_LEAD_MINS) + 5
+    time_max   = now + timedelta(minutes=lookahead)
 
     cal_list     = service.calendarList().list().execute()
     calendar_ids = []
