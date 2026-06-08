@@ -84,15 +84,47 @@ bash install.sh
 
 ---
 
-## Step 3 — You're done
+## Step 3 — Set up push notifications (optional but recommended)
 
-After install you'll see a 📋 icon in your macOS menu bar. The app is now running.
+The app can send a push notification to your iPhone **15 minutes before every meeting** using [ntfy](https://ntfy.sh) — a free, no-account-required service.
+
+### 3.1 Install ntfy on your iPhone
+
+1. Open the **App Store** and search for **"ntfy"** (by Philipp Heckel)
+2. Install and open the app
+3. Tap **+** → **Subscribe to topic**
+4. Enter a unique topic name (e.g. `my-calendar` — pick something only you'd know)
+5. Tap **Subscribe**
+6. Allow notifications when prompted
+
+### 3.2 Configure the topic in the app
+
+Open `calendar_postit.py` and set your topic name near the top:
+
+```python
+NTFY_TOPIC = "my-calendar"   # replace with your chosen topic name
+```
+
+### 3.3 Test it
+
+Right-click the menu bar icon and select **🔔 Test push notification**. Your phone should ping within a few seconds.
+
+> **Privacy note:** ntfy topic names are public URLs — anyone who knows your topic name can send to it. Use something unique and hard to guess, or consider [self-hosting ntfy](https://docs.ntfy.sh/install/) for full privacy.
+
+---
+
+## Step 4 — You're done
+
+After install you'll see a 📌 icon in your macOS menu bar. The app is now running.
 
 **Right-click the menu bar icon** to access:
 
 | Menu item | What it does |
 |---|---|
+| 🔍 Search calendar | Open the search window to query your calendar |
+| ⚙️ Settings | Adjust how many minutes before a meeting popups appear |
 | 🧪 Test notification | Shows a sample sticky-note immediately so you can preview the look |
+| 🔔 Test push notification | Sends a test push notification to your phone via ntfy |
 | Quit Calendar Post-It | Stops the app (it will restart on next login) |
 
 ---
